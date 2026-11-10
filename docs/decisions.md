@@ -2,6 +2,16 @@
 
 Tartós döntésenként egy bejegyzés, a legújabb elöl. Változó döntést helyben szerkesztünk (a változás dátumával), nem duplikálunk. A korábbi döntések háttere a `README.md`-ben van (biztonsági modell, séma).
 
+## 2026-11-06 · Statisztika hónapokra bontva, fánk nélkül
+- **Döntés:** a Statistics két szintű: áttekintő (12 havi oszlopok, hónaplista) és hónapnézet (bevétel/kiadás csempe mint választó, 12 havi átlag, hónap végi egyenleg, lebontás kategória vagy zseb szerint rangsorolt sávokkal). Fánkdiagram és automatikus „észrevételek” nincsenek. A lebontási sor lefúrása pontosan azokat a tételeket listázza, amelyekből az összeg áll (a History `drill` paramétere, Jar-összevonás nélkül). Az eszköz- és zsebkör-választás a két képernyőn közös, de csak memóriában él. Hónap = naptári hónap, egyszerre egy eszköz (nincs átváltás).
+- **Miért:** a fánk negatív összeget nem tud ábrázolni, és sok kategóriánál olvashatatlan; a cél az átláthatóság, egy képernyő egy kérdésre feleljen. Gyula döntése (B változat, átlaghoz viszonyítás, hónap végi egyenleg benne, észrevételek nélkül).
+- **Érinti:** `src/screens/StatisticsScreen.tsx`, `src/screens/StatisticsMonthScreen.tsx`, `src/domain/monthlyStats.ts`, `src/db/repositories/monthlyStats.ts`, `src/domain/transactionFilter.ts` (`TransactionDrill`), `DESIGN.md` (Charts). Spec: `docs/specs/2026-11-06-statistics-months.md`.
+
+## 2026-11-06 · A repó-réteg SQL-jét valódi SQLite-on teszteljük
+- **Döntés:** a `src/db/repositories/*` tesztjei a Node beépített `node:sqlite` moduljával egy memóriabeli adatbázison futnak (`tests/stubs/dbClient.ts`, `tests/ledgerFixture.ts`; a `tests/resolve-ts.mjs` cseréli a `../client` importot). Pénzt számoló új lekérdezéshez ilyen teszt jár, nem csak a tiszta logikához.
+- **Miért:** a tiszta logika tesztjei nem fogták meg, hogy az „Outside Jar” kezdőegyenleg SQL-je rossz (B24); az első valódi SQLite-os összevetés megtalálta. Új függőség nem kell. Helyben Node 22 fut; a CI (Node 20) csak típusellenőriz, a teszteket nem futtatja.
+- **Érinti:** `tests/`, `scripts/check.sh` (a `npm test` része).
+
 ## 2026-10-27 · Összegbevitel: a vessző és a pont is tizedesjel
 - **Döntés:** az összegmezőben a `,` és a `.` egyaránt a tizedeseket jelöli; számjegyet csoportosítani csak szóközzel lehet; két elválasztó („1,000.50”) hiba, nem találgatunk.
 - **Miért:** a régi parser minden vesszőt eldobott, így a magyar „12,5” 125 lett (B7). Gyula döntése.

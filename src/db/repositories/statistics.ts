@@ -9,26 +9,6 @@ export type StatisticsScope =
   | { mode: 'pocket'; pocketId: string }
   | { mode: 'exclude_jar'; jarId: string };
 
-/** Restricts balance/mix queries to one category's income+expense rows (transfers never have a category). */
-export type CategoryFilter =
-  | { mode: 'all' }
-  | { mode: 'uncategorized' }
-  | { mode: 'one'; categoryId: string };
-
-const ALL_CATEGORY_FILTER: CategoryFilter = { mode: 'all' };
-
-/** `kind` restriction is required alongside the category predicate: transfers always have a NULL
- *  category_id, so without it an "Uncategorized" filter would also sweep in every transfer. */
-function categoryFilterSql(filter: CategoryFilter): { sql: string; params: string[] } {
-  if (filter.mode === 'uncategorized') {
-    return { sql: `AND kind IN ('income', 'expense') AND category_id IS NULL`, params: [] };
-  }
-  if (filter.mode === 'one') {
-    return { sql: `AND kind IN ('income', 'expense') AND category_id = ?`, params: [filter.categoryId] };
-  }
-  return { sql: '', params: [] };
-}
-
 export type BalanceTimelinePoint = {
   /** Unix ms */
   at: number;
@@ -74,58 +54,58 @@ function deltaForScope(row: TxRow, scope: StatisticsScope): number {
   return 0;
 }
 
-async function baselineMinorBefore(
-  currency: string,
-  scope: StatisticsScope,
-  beforeMs: number,
-  categoryFilter: CategoryFilter = ALL_CATEGORY_FILTER
-): Promise<number> {
-  const db = await openMainDatabase();
-  const cat = categoryFilterSql(categoryFilter);
+/**
+ * The signed balance change of one `transactions` row for `scope`, as a SQL expression: income and
+ * expense move the balance of their pocket; a transfer adds where its target is inside the scope and
+ * subtracts where its source is, independently, so a transfer with both sides inside nets to zero
+ * (a single CASE would stop at the first matching side and count it as money leaving).
+ */
+export function scopeBalanceDeltaSql(scope: StatisticsScope): { sql: string; params: string[] } {
   if (scope.mode === 'all') {
-    const r = await db.getFirstAsync<{ b: number }>(
-      `SELECT COALESCE(SUM(
-        CASE kind
+    return {
+      sql: `CASE kind
           WHEN 'income' THEN amount_minor
           WHEN 'expense' THEN -amount_minor
           ELSE 0
-        END
-      ), 0) AS b
-      FROM transactions WHERE currency = ? AND occurred_at < ? ${cat.sql}`,
-      [currency, beforeMs, ...cat.params]
-    );
-    return r?.b ?? 0;
+        END`,
+      params: [],
+    };
   }
   if (scope.mode === 'pocket') {
     const p = scope.pocketId;
-    const r = await db.getFirstAsync<{ b: number }>(
-      `SELECT COALESCE(SUM(
-        CASE
+    return {
+      sql: `CASE
           WHEN kind = 'income' AND pocket_id = ? THEN amount_minor
           WHEN kind = 'expense' AND pocket_id = ? THEN -amount_minor
-          WHEN kind = 'transfer' AND from_pocket_id = ? THEN -amount_minor
-          WHEN kind = 'transfer' AND to_pocket_id = ? THEN amount_minor
+          WHEN kind = 'transfer' THEN
+            (CASE WHEN to_pocket_id = ? THEN amount_minor ELSE 0 END)
+            - (CASE WHEN from_pocket_id = ? THEN amount_minor ELSE 0 END)
           ELSE 0
-        END
-      ), 0) AS b
-      FROM transactions WHERE currency = ? AND occurred_at < ? ${cat.sql}`,
-      [p, p, p, p, currency, beforeMs, ...cat.params]
-    );
-    return r?.b ?? 0;
+        END`,
+      params: [p, p, p, p],
+    };
   }
   const j = scope.jarId;
-  const r = await db.getFirstAsync<{ b: number }>(
-    `SELECT COALESCE(SUM(
-      CASE
+  return {
+    sql: `CASE
         WHEN kind = 'income' AND pocket_id IS NOT NULL AND pocket_id != ? THEN amount_minor
         WHEN kind = 'expense' AND pocket_id IS NOT NULL AND pocket_id != ? THEN -amount_minor
-        WHEN kind = 'transfer' AND from_pocket_id != ? THEN -amount_minor
-        WHEN kind = 'transfer' AND to_pocket_id != ? THEN amount_minor
+        WHEN kind = 'transfer' THEN
+          (CASE WHEN to_pocket_id != ? THEN amount_minor ELSE 0 END)
+          - (CASE WHEN from_pocket_id != ? THEN amount_minor ELSE 0 END)
         ELSE 0
-      END
-    ), 0) AS b
-    FROM transactions WHERE currency = ? AND occurred_at < ? ${cat.sql}`,
-    [j, j, j, j, currency, beforeMs, ...cat.params]
+      END`,
+    params: [j, j, j, j],
+  };
+}
+
+async function baselineMinorBefore(currency: string, scope: StatisticsScope, beforeMs: number): Promise<number> {
+  const db = await openMainDatabase();
+  const delta = scopeBalanceDeltaSql(scope);
+  const r = await db.getFirstAsync<{ b: number }>(
+    `SELECT COALESCE(SUM(${delta.sql}), 0) AS b
+    FROM transactions WHERE currency = ? AND occurred_at < ?`,
+    [...delta.params, currency, beforeMs]
   );
   return r?.b ?? 0;
 }
@@ -139,20 +119,18 @@ export async function getBalanceTimeline(
   currency: string,
   scope: StatisticsScope,
   startMs: number,
-  endMs: number,
-  categoryFilter: CategoryFilter = ALL_CATEGORY_FILTER
+  endMs: number
 ): Promise<BalanceTimelinePoint[]> {
   const db = await openMainDatabase();
-  const cat = categoryFilterSql(categoryFilter);
   const rows = await db.getAllAsync<TxRow>(
     `SELECT kind, amount_minor, occurred_at, pocket_id, from_pocket_id, to_pocket_id
      FROM transactions
-     WHERE currency = ? AND occurred_at >= ? AND occurred_at <= ? ${cat.sql}
+     WHERE currency = ? AND occurred_at >= ? AND occurred_at <= ?
      ORDER BY occurred_at ASC, id ASC`,
-    [currency, startMs, endMs, ...cat.params]
+    [currency, startMs, endMs]
   );
 
-  let running = await baselineMinorBefore(currency, scope, startMs, categoryFilter);
+  let running = await baselineMinorBefore(currency, scope, startMs);
   const points: BalanceTimelinePoint[] = [{ at: startMs, balance_minor: running }];
 
   for (const row of rows) {
@@ -196,64 +174,6 @@ export function downsampleTimeline(
   return deduped.length >= 2 ? deduped : out;
 }
 
-async function balanceMinorForPocketAt(
-  pocketId: string,
-  currency: string,
-  atMs: number,
-  categoryFilter: CategoryFilter = ALL_CATEGORY_FILTER
-): Promise<bigint> {
-  const db = await openMainDatabase();
-  const cat = categoryFilterSql(categoryFilter);
-  // Read as text: the driver's JS numbers are exact only up to 2^53.
-  const r = await db.getFirstAsync<{ b: string }>(
-    `SELECT CAST(COALESCE(SUM(
-      CASE
-        WHEN kind = 'income' AND pocket_id = ? THEN amount_minor
-        WHEN kind = 'expense' AND pocket_id = ? THEN -amount_minor
-        WHEN kind = 'transfer' AND from_pocket_id = ? THEN -amount_minor
-        WHEN kind = 'transfer' AND to_pocket_id = ? THEN amount_minor
-        ELSE 0
-      END
-    ), 0) AS TEXT) AS b
-    FROM transactions WHERE currency = ? AND occurred_at <= ? ${cat.sql}`,
-    [pocketId, pocketId, pocketId, pocketId, currency, atMs, ...cat.params]
-  );
-  return BigInt(r?.b ?? 0);
-}
-
-export type PocketSlice = {
-  pocketId: string;
-  name: string;
-  balance_minor: bigint;
-};
-
-/**
- * Non-zero pocket balances for one currency at `atMs` (for donut). Excludes archived pockets if not passed.
- * With a category filter active, "balance" becomes "net signed total of that category's income/expense
- * transactions routed through this pocket" — transfers never carry a category, so they drop out entirely.
- */
-export async function getPocketSlicesAt(
-  currency: string,
-  atMs: number,
-  options: { jarId: string | null; excludeJar: boolean },
-  categoryFilter: CategoryFilter = ALL_CATEGORY_FILTER
-): Promise<PocketSlice[]> {
-  const db = await openMainDatabase();
-  const prows = await db.getAllAsync<{ id: string; name: string; is_jar: number; archived: number }>(
-    `SELECT id, name, is_jar, archived FROM pockets ORDER BY is_jar DESC, sort_index ASC, name COLLATE NOCASE ASC`
-  );
-
-  const slices: PocketSlice[] = [];
-  for (const p of prows) {
-    if (p.archived === 1) continue;
-    if (options.excludeJar && options.jarId && p.id === options.jarId) continue;
-    const bal = await balanceMinorForPocketAt(p.id, currency, atMs, categoryFilter);
-    if (bal === 0n) continue;
-    slices.push({ pocketId: p.id, name: p.name, balance_minor: bal });
-  }
-  return slices;
-}
-
 /** Pocket restriction for income/expense queries over `transactions t` (transfers are filtered out by `kind`). */
 export function scopeSql(scope: StatisticsScope): { sql: string; params: string[] } {
   if (scope.mode === 'pocket') {
@@ -263,60 +183,6 @@ export function scopeSql(scope: StatisticsScope): { sql: string; params: string[
     return { sql: 'AND t.pocket_id != ?', params: [scope.jarId] };
   }
   return { sql: '', params: [] };
-}
-
-export type CategorySlice = {
-  categoryId: string | null;
-  name: string;
-  color: string | null;
-  total_minor: number;
-};
-
-/**
- * Income and expense totals by category for `currency` within [startMs, endMs] for the given scope.
- * Transfers are excluded (they never carry a category). Unlike `getPocketSlicesAt`, this is a period
- * sum, not a point-in-time balance — "how much did category X earn/cost in this range" is the natural
- * question for categories, whereas pockets need a balance snapshot because their totals persist.
- */
-export async function getCategorySlices(
-  currency: string,
-  scope: StatisticsScope,
-  startMs: number,
-  endMs: number
-): Promise<{ income: CategorySlice[]; expense: CategorySlice[] }> {
-  const db = await openMainDatabase();
-  const scoped = scopeSql(scope);
-  const rows = await db.getAllAsync<{
-    category_id: string | null;
-    category_name: string | null;
-    category_color: string | null;
-    kind: string;
-    total_minor: number;
-  }>(
-    `SELECT t.category_id AS category_id, c.name AS category_name, c.color AS category_color,
-            t.kind AS kind, SUM(t.amount_minor) AS total_minor
-     FROM transactions t
-     LEFT JOIN categories c ON c.id = t.category_id
-     WHERE t.currency = ? AND t.occurred_at >= ? AND t.occurred_at <= ?
-       AND t.kind IN ('income', 'expense') ${scoped.sql}
-     GROUP BY t.category_id, t.kind
-     HAVING SUM(t.amount_minor) > 0
-     ORDER BY total_minor DESC`,
-    [currency, startMs, endMs, ...scoped.params]
-  );
-
-  const income: CategorySlice[] = [];
-  const expense: CategorySlice[] = [];
-  for (const r of rows) {
-    const slice: CategorySlice = {
-      categoryId: r.category_id,
-      name: r.category_name ?? 'Uncategorized',
-      color: r.category_color,
-      total_minor: r.total_minor,
-    };
-    (r.kind === 'income' ? income : expense).push(slice);
-  }
-  return { income, expense };
 }
 
 export async function getEarliestOccurredAt(): Promise<number | null> {

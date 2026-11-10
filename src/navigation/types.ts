@@ -1,5 +1,7 @@
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 
+import type { TransactionDrill } from '../domain/transactionFilter';
+
 export type RootStackParamList = {
   Home: undefined;
   Pockets: undefined;
@@ -11,8 +13,11 @@ export type RootStackParamList = {
     fromPocketId?: string;
     toPocketId?: string;
   };
-  History: { pocketId?: string } | undefined;
+  /** `drill`: the transactions behind one Statistics breakdown row, instead of the normal filters. */
+  History: { pocketId?: string; drill?: TransactionDrill } | undefined;
   Statistics: { initialCurrency?: string } | undefined;
+  /** `monthKey` is `YYYY-MM`. */
+  StatisticsMonth: { monthKey: string };
   ReportExport: undefined;
   Settings: undefined;
   AssetTypes: undefined;

@@ -4,6 +4,7 @@ import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 import { useAppTheme } from '../theme/ThemeContext';
 import { font } from '../theme/fonts';
 import type { AppColors } from '../theme/palette';
+import { HIT_SLOP } from '../utils/hitSlop';
 
 export type ModalSelectOption = {
   value: string;
@@ -33,6 +34,8 @@ type Props = {
   /** Values currently toggled on; shown with a checkmark. */
   selectedValues?: string[];
   onToggleValue?: (value: string) => void;
+  /** `chip`: a small pill showing only the value (the label is read out, not shown), e.g. Statistics. */
+  trigger?: 'field' | 'chip';
 };
 
 export function ModalSelectField({
@@ -50,6 +53,7 @@ export function ModalSelectField({
   multiSelect = false,
   selectedValues = [],
   onToggleValue,
+  trigger = 'field',
 }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(
@@ -62,21 +66,40 @@ export function ModalSelectField({
 
   return (
     <View>
-      <Text style={styles.label}>{label}</Text>
-      <Pressable
-        style={[styles.field, disabled && styles.fieldDisabled]}
-        onPress={() => !disabled && setOpen(true)}
-        disabled={disabled}
-      >
-        <Text
-          style={[styles.fieldText, showPlaceholder && styles.fieldPlaceholder]}
-          numberOfLines={compact ? 1 : 2}
-          ellipsizeMode="tail"
+      {trigger === 'chip' ? (
+        <Pressable
+          style={({ pressed }) => [styles.chip, pressed && styles.chipPressed, disabled && styles.fieldDisabled]}
+          onPress={() => !disabled && setOpen(true)}
+          disabled={disabled}
+          hitSlop={HIT_SLOP}
+          accessibilityRole="button"
+          accessibilityLabel={`${label}: ${showPlaceholder ? placeholder : trimmed}`}
+          accessibilityState={{ disabled: !!disabled }}
         >
-          {showPlaceholder ? placeholder : trimmed}
-        </Text>
-        <Text style={styles.chevron}>›</Text>
-      </Pressable>
+          <Text style={styles.chipText} numberOfLines={1} ellipsizeMode="tail">
+            {showPlaceholder ? placeholder : trimmed}
+          </Text>
+          <Text style={styles.chipChevron}>▾</Text>
+        </Pressable>
+      ) : (
+        <>
+          <Text style={styles.label}>{label}</Text>
+          <Pressable
+            style={[styles.field, disabled && styles.fieldDisabled]}
+            onPress={() => !disabled && setOpen(true)}
+            disabled={disabled}
+          >
+            <Text
+              style={[styles.fieldText, showPlaceholder && styles.fieldPlaceholder]}
+              numberOfLines={compact ? 1 : 2}
+              ellipsizeMode="tail"
+            >
+              {showPlaceholder ? placeholder : trimmed}
+            </Text>
+            <Text style={styles.chevron}>›</Text>
+          </Pressable>
+        </>
+      )}
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.overlay} onPress={() => setOpen(false)}>
@@ -165,6 +188,21 @@ function createStyles(
       gap: compact ? 4 : 10,
     },
     fieldDisabled: { opacity: 0.5 },
+    chip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      maxWidth: 200,
+      backgroundColor: c.chipBg,
+      borderWidth: 1,
+      borderColor: c.jarSoftBorder,
+      borderRadius: 20,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    },
+    chipPressed: { borderColor: c.primary },
+    chipText: { flexShrink: 1, fontSize: 13, fontFamily: font.semibold, color: c.chipText },
+    chipChevron: { fontSize: 12, color: c.chipText },
     fieldText: { flex: 1, fontSize: compact ? 13 : 16, color: fieldTextColor },
     fieldPlaceholder: { color: c.placeholder },
     chevron: {

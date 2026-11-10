@@ -59,7 +59,7 @@ function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-function monthKey(d: Date): string {
+export function monthKey(d: Date): string {
   return `${String(d.getFullYear()).padStart(4, '0')}-${pad2(d.getMonth() + 1)}`;
 }
 

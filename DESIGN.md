@@ -98,10 +98,13 @@ Radii in use: 8 (chips, small controls, bars), 10 (buttons, inputs, the most com
 - **Disabled primary buttons** turn into a muted, bordered surface with `textMuted` text, never a faded accent fill (the label has to stay readable).
 - **Primary actions side by side:** a pocket's Income, Expense and Transfer sit in one row (the first two filled, Transfer outlined). A form puts the amount first, next to its asset.
 - **`ModalSelectField`:** the one select pattern everywhere, including multi-select filter sheets (tap toggles a checkmark and keeps the sheet open; "All" clears and closes).
-- **Collapsible filter / settings panels** (History, Statistics): summary chips (`chipBg` / `chipText`) when collapsed.
+- **Collapsible filter panels** (History): summary chips (`chipBg` / `chipText`) when collapsed.
 - **Pocket picker rows:** `pocketPick*` tokens; selected state uses border and text colour.
-- **Charts:** `react-native-gifted-charts` (line, and the donut in `DonutChart`) and the Jar's own SVG chart; value readout in a fixed row above the chart (no floating tooltip; Android ScrollView clips overflow). A drawn chart is an `image` for screen readers with a one-sentence summary; the donut's legend (name, share, amount) is the readable version. The line chart draws the zero line so negative stretches are visible without colour.
+- **Charts:** `react-native-gifted-charts` for the balance line, the Jar's own SVG chart, and plain views for `MonthlyBarsChart` (income in chart slot 1, expense in slot 0, named in a text legend) and `RankedBarList`; no donuts (they cannot show a negative total). Value readout in a fixed row above the line chart (no floating tooltip; Android ScrollView clips overflow). A drawn chart is an `image` for screen readers with a one-sentence summary; a list next to it (the month list, the breakdown rows) is the readable version. Zero lines are drawn, so negative stretches are visible without colour.
 - **Switches:** `switchTrack*` / `switchThumb*` tokens, never the platform default colours.
+- **Selector chips** (`ModalSelectField` with `trigger="chip"`, Statistics): a `chipBg` pill showing only the value and `▾`; the label is read out, not shown. Tapping opens the usual sheet.
+- **`SegmentedControl`:** two or three mutually exclusive options on `surfaceMuted`; the selected one is a `surface` tile with a `primary` border and semibold `primary` text, so the choice does not rest on colour alone. Radio semantics for screen readers.
+- **`RankedBarList`:** a breakdown as rows (name, amount, share) with an 8 dp bar under each on `barTrack`, longest first, at most 7 before "Show all N". Preferred over a donut: it reads with many items and leaves negative totals as plain rows.
 
 ## Do's and Don'ts
 - Do: take every colour from `useAppTheme()`; add a new token to `AppColors` and to all six palettes in both variants in the same change, and list it here.

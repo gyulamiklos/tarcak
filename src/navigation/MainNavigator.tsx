@@ -13,6 +13,7 @@ import PocketDetailScreen from '../screens/PocketDetailScreen';
 import PocketsScreen from '../screens/PocketsScreen';
 import ReportExportScreen from '../screens/ReportExportScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+import StatisticsMonthScreen from '../screens/StatisticsMonthScreen';
 import StatisticsScreen from '../screens/StatisticsScreen';
 import TransactionEditorScreen from '../screens/TransactionEditorScreen';
 import { useAppTheme } from '../theme/ThemeContext';
@@ -70,6 +71,7 @@ function MainStack() {
         />
         <Stack.Screen name="History" component={HistoryScreen} options={{ title: 'History' }} />
         <Stack.Screen name="Statistics" component={StatisticsScreen} options={{ title: 'Statistics' }} />
+        <Stack.Screen name="StatisticsMonth" component={StatisticsMonthScreen} options={{ title: 'Month' }} />
         <Stack.Screen
           name="ReportExport"
           component={ReportExportScreen}

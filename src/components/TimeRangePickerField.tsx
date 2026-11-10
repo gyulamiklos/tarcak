@@ -24,10 +24,10 @@ const PRESET_LABELS: Record<TimeRangePresetId, string> = {
   all: 'All time',
 };
 
-const MONTH_SHORT = [
+export const MONTH_SHORT = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ];
-const MONTH_LONG = [
+export const MONTH_LONG = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];

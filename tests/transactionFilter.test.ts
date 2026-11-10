@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-import { buildTransactionFilter, UNCATEGORIZED_FILTER } from '../src/domain/transactionFilter';
+import { buildTransactionFilter, filterForDrill, UNCATEGORIZED_FILTER } from '../src/domain/transactionFilter';
 
 describe('buildTransactionFilter', () => {
   test('no filters give no clauses', () => {
@@ -61,5 +61,32 @@ describe('buildTransactionFilter', () => {
     });
     assert.equal(f.clauses.length, 4);
     assert.deepEqual(f.params, ['expense', 'HUF', 'a', 'a', 'a']);
+  });
+
+  test('time bounds are inclusive below and exclusive above', () => {
+    const f = buildTransactionFilter({ kinds: ['expense'], fromMs: 100, toMs: 200 });
+    assert.deepEqual(f.clauses, ['(kind = ?)', 'occurred_at >= ?', 'occurred_at < ?']);
+    assert.deepEqual(f.params, ['expense', 100, 200]);
+  });
+});
+
+describe('filterForDrill', () => {
+  const base = { label: 'Oct 2026', currency: 'HUF', fromMs: 100, toMs: 200 };
+
+  test('income means the income kind only, without Jar pooling', () => {
+    const f = buildTransactionFilter(filterForDrill({ ...base, kind: 'income' }));
+    assert.deepEqual(f.clauses, ['(kind = ?)', 'currency IN (?)', 'occurred_at >= ?', 'occurred_at < ?']);
+    assert.deepEqual(f.params, ['income', 'HUF', 100, 200]);
+  });
+
+  test('a null category asks for uncategorized rows, an absent one for every category', () => {
+    assert.deepEqual(filterForDrill({ ...base, kind: 'expense', categoryId: null }).categoryIds, [UNCATEGORIZED_FILTER]);
+    assert.deepEqual(filterForDrill({ ...base, kind: 'expense', categoryId: 'c1' }).categoryIds, ['c1']);
+    assert.deepEqual(filterForDrill({ ...base, kind: 'expense' }).categoryIds, []);
+  });
+
+  test('pockets pass through; absent means every pocket', () => {
+    assert.deepEqual(filterForDrill({ ...base, kind: 'expense', pocketIds: ['a', 'b'] }).pocketIds, ['a', 'b']);
+    assert.deepEqual(filterForDrill({ ...base, kind: 'expense' }).pocketIds, []);
   });
 });

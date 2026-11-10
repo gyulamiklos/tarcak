@@ -53,3 +53,6 @@ yarn-error.*
 # Claude Code (personal)
 CLAUDE.local.md
 .claude/settings.local.json
+
+# Local release builds (EAS --local output)
+*.aab

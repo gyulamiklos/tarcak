@@ -1,808 +1,258 @@
 import { useFocusEffect } from '@react-navigation/native';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from 'react-native';
-import { LineChart } from 'react-native-gifted-charts';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { DonutChart, type DonutSlice } from '../components/DonutChart';
-import { ModalSelectField } from '../components/ModalSelectField';
+import { BalanceTrendCard } from '../components/BalanceTrendCard';
+import { MonthlyBarsChart, type MonthBars } from '../components/MonthlyBarsChart';
 import { ScreenWithFooter } from '../components/ScreenWithFooter';
-import {
-  formatTimeRangeLabel,
-  resolveTimeRange,
-  TimeRangePickerField,
-  type TimeRangeValue,
-} from '../components/TimeRangePickerField';
-import * as assetTypesRepo from '../db/repositories/assetTypes';
-import * as categoriesRepo from '../db/repositories/categories';
-import * as pocketsRepo from '../db/repositories/pockets';
-import * as settingsRepo from '../db/repositories/settings';
-import {
-  downsampleTimeline,
-  getBalanceTimeline,
-  getCategorySlices,
-  getEarliestOccurredAt,
-  getPocketSlicesAt,
-  type BalanceTimelinePoint,
-  type CategoryFilter,
-  type CategorySlice,
-  type PocketSlice,
-  type StatisticsScope,
-} from '../db/repositories/statistics';
-import type { AssetType, Category, Pocket } from '../domain/types';
+import { getFirstActivityAt } from '../db/repositories/monthlyStats';
+import type { ReportMonth } from '../domain/monthlyReport';
+import { monthOf, monthsEndingAt, shiftMonthKey, summarizeMonths, type FlowRow } from '../domain/monthlyStats';
 import type { RootStackScreenProps } from '../navigation/types';
 import { useAppTheme } from '../theme/ThemeContext';
 import { font } from '../theme/fonts';
 import type { AppColors } from '../theme/palette';
-import { AMOUNT_MINOR_SCALE } from '../utils/amountMinor';
-import { animateNextLayout } from '../utils/animateLayout';
-import { assetLabel, assetSubtitle } from '../utils/assetLabel';
-import { formatMinorAmountForDisplay, formatMinorForDisplay } from '../utils/formatMinor';
-import { formatOccurredAt } from '../utils/formatOccurredAt';
-import { formatShare } from '../utils/formatShare';
-import { assignChartColors, buildThemeChartPalette, resolveStoredColor } from '../utils/pocketChartColors';
+import { formatMinorAmountForDisplay } from '../utils/formatMinor';
+import { HIT_SLOP } from '../utils/hitSlop';
+import { buildThemeChartPalette } from '../utils/pocketChartColors';
+import { monthAbbrev, monthLongLabel, monthShortLabel, signedAmount } from './statistics/format';
+import { loadFlows } from './statistics/loadFlows';
+import { StatisticsChips } from './statistics/StatisticsChips';
+import { setStatisticsSelection, useStatisticsSelection } from './statistics/useStatisticsSelection';
 
-/** Must match LineChart `yAxisLabelWidth` so layout math stays consistent. */
-const Y_AXIS_LABEL_WIDTH = 52;
-const CHART_INITIAL_SPACING = 2;
-const CHART_END_SPACING = 2;
+/** Months in the bar chart, and months added by "Show earlier months". */
+const PAGE_MONTHS = 12;
 
-const MAX_LINE_POINTS = 72;
-
-/** Sections above the zero line; matches the `noOfSections` passed to LineChart. */
-const LINE_NO_OF_SECTIONS = 4;
-/**
- * Hard cap on sections rendered below the zero line. Without an explicit `stepValue`,
- * gifted-charts derives it from `maxValue / noOfSections` and then sizes the negative area as
- * `ceil(|mostNegativeValue| / stepValue)` sections of the same height — when a deep negative dip
- * is small relative to the visible peak, that count (and the chart's total rendered height,
- * `containerHeight + noOfSectionsBelowXAxis * stepHeight`) can blow up unboundedly. Computing our
- * own `stepValue`/`maxValue`/`noOfSectionsBelowXAxis` below keeps the total height predictable.
- */
-const LINE_MAX_NEG_SECTIONS = 2;
-
-/** Rounds a step up to 1, 2, 2.5 or 5 times a power of ten, so the Y ticks read as round numbers. */
-function niceStep(raw: number): number {
-  if (!(raw > 0)) return 1;
-  const pow = 10 ** Math.floor(Math.log10(raw));
-  const f = raw / pow;
-  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * pow;
-}
-
-function computeLineChartScale(points: { balance_minor: number }[]) {
-  const values = points.map((p) => p.balance_minor);
-  const dataMax = values.length ? Math.max(0, ...values) : 0;
-  const dataMin = values.length ? Math.min(0, ...values) : 0;
-  if (dataMin >= 0) {
-    const stepValue = niceStep(dataMax / LINE_NO_OF_SECTIONS);
-    return {
-      maxValue: stepValue * LINE_NO_OF_SECTIONS,
-      stepValue,
-      mostNegativeValue: 0,
-      noOfSectionsBelowXAxis: 0,
-    };
-  }
-  const negMagnitude = Math.abs(dataMin);
-  const stepValue = niceStep(Math.max(dataMax / LINE_NO_OF_SECTIONS, negMagnitude / LINE_MAX_NEG_SECTIONS));
-  const noOfSectionsBelowXAxis = Math.max(
-    1,
-    Math.min(LINE_MAX_NEG_SECTIONS, Math.ceil(negMagnitude / stepValue))
-  );
-  return {
-    maxValue: stepValue * LINE_NO_OF_SECTIONS,
-    stepValue,
-    mostNegativeValue: dataMin,
-    noOfSectionsBelowXAxis,
-  };
-}
-
-/**
- * Gifted Charts passes Y tick values in the same numeric space as `data[].value` (here: minor units).
- * Show human-readable major units (1.00 = one full coin), not raw integers.
- */
-function formatYAxisMajorLabel(giftedLabel: string): string {
-  const minor = Math.round(Number(giftedLabel));
-  if (!Number.isFinite(minor)) return '';
-  if (minor === 0) return '0';
-  const major = minor / AMOUNT_MINOR_SCALE;
-  const abs = Math.abs(major);
-  if (abs >= 1_000_000) return `${(major / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
-  if (abs >= 10_000) return `${(major / 1000).toFixed(1).replace(/\.0$/, '')}k`;
-  if (abs >= 100) return major.toFixed(0);
-  if (abs >= 10) return major.toFixed(1);
-  if (abs >= 1) return major.toFixed(2);
-  return major.toFixed(3);
-}
-
-type ActivePoint = { ts: number; v: number };
-
-function axisDateLabel(ts: number): string {
-  try {
-    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  } catch {
-    return '';
-  }
-}
+type Loaded = {
+  /** What the data belongs to; a change of asset or scope drops it. */
+  selectionKey: string;
+  /** Oldest first; the last one is the current month. */
+  months: ReportMonth[];
+  flows: FlowRow[];
+  firstActivityAt: number | null;
+};
 
 export default function StatisticsScreen({ route, navigation }: RootStackScreenProps<'Statistics'>) {
   const { colors, isDark } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const { width: winW } = useWindowDimensions();
-
   const chartPalette = useMemo(() => buildThemeChartPalette(colors, isDark), [colors, isDark]);
+  const selection = useStatisticsSelection();
+  const { ready, currency, scope, scopeKey } = selection;
+  const selectionKey = `${currency ?? ''}|${scopeKey}`;
 
-  const [assetTypes, setAssetTypes] = useState<AssetType[]>([]);
-  const [currency, setCurrency] = useState('HUF');
-  const [jarPocket, setJarPocket] = useState<Pocket | null>(null);
-  const [pockets, setPockets] = useState<Pocket[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [scopeKey, setScopeKey] = useState('all');
-  const [categoryFilterKey, setCategoryFilterKey] = useState('all');
-  const [rangeValue, setRangeValue] = useState<TimeRangeValue>({ kind: 'preset', id: '30d' });
-  const [earliest, setEarliest] = useState<number | null>(null);
-  /** Collapsed by default — Asset/Scope/Category/Range all have sensible defaults, so nothing
-   *  requires the user to open this before the charts render. */
-  const [settingsExpanded, setSettingsExpanded] = useState(false);
-
-  const [lineLoading, setLineLoading] = useState(true);
-  const [linePoints, setLinePoints] = useState<BalanceTimelinePoint[]>([]);
-  const [pieSlices, setPieSlices] = useState<PocketSlice[]>([]);
-  const [categoryExpenseSlices, setCategoryExpenseSlices] = useState<CategorySlice[]>([]);
-  const [categoryIncomeSlices, setCategoryIncomeSlices] = useState<CategorySlice[]>([]);
-  const [rangeMeta, setRangeMeta] = useState({ startMs: 0, endMs: 0 });
-  /** Measured width of the chart row (full card content width). */
-  const [chartRowWidth, setChartRowWidth] = useState(0);
-  /**
-   * Touched chart point, shown in a fixed-position readout row instead of a floating tooltip.
-   * A floating, absolutely-positioned label rendered by the chart library was getting clipped by
-   * Android's ScrollView view-flattening whenever it needed to render outside its own box, no
-   * matter what z-index/elevation/collapsable combination was tried — a fixed row in normal
-   * layout flow can't be clipped that way since nothing needs to escape its own bounds.
-   */
-  const [activePoint, setActivePoint] = useState<ActivePoint | null>(null);
-  const activePointRef = useRef<ActivePoint | null>(null);
-
-  useFocusEffect(
-    useCallback(() => {
-      void (async () => {
-        const showArchived = await settingsRepo.getShowArchivedPockets();
-        const [types, def, jar, plist, early, cats] = await Promise.all([
-          assetTypesRepo.listAssetTypes(),
-          settingsRepo.getDefaultCurrency(),
-          pocketsRepo.getJarPocket(),
-          pocketsRepo.listPockets(showArchived),
-          getEarliestOccurredAt(),
-          categoriesRepo.listCategories(),
-        ]);
-        setAssetTypes(types);
-        setCategories(cats);
-        const raw = route.params?.initialCurrency;
-        const paramCode =
-          typeof raw === 'string' && raw.trim() ? raw.trim().toUpperCase() : '';
-        const fromNav =
-          paramCode && types.some((t) => t.code === paramCode) ? paramCode : null;
-        setCurrency((prev) => {
-          if (fromNav) return fromNav;
-          return types.some((t) => t.code === prev) ? prev : def;
-        });
-        if (paramCode) {
-          navigation.setParams({ initialCurrency: undefined });
-        }
-        setJarPocket(jar);
-        setPockets(plist);
-        setEarliest(early);
-      })();
-    }, [navigation, route.params?.initialCurrency])
-  );
-
-  const statisticsScope = useMemo((): StatisticsScope => {
-    if (scopeKey === 'all') return { mode: 'all' };
-    if (scopeKey === 'exclude_jar' && jarPocket) return { mode: 'exclude_jar', jarId: jarPocket.id };
-    if (scopeKey.startsWith('pocket:')) {
-      return { mode: 'pocket', pocketId: scopeKey.slice('pocket:'.length) };
-    }
-    return { mode: 'all' };
-  }, [scopeKey, jarPocket]);
-
-  const scopeOptions = useMemo(() => {
-    const opts = [{ value: 'all', title: 'All pockets', subtitle: 'Total in this asset' }];
-    if (jarPocket && !jarPocket.archived) {
-      opts.push({
-        value: 'exclude_jar',
-        title: 'Outside Jar',
-        subtitle: 'All pockets except the Jar',
-      });
-    }
-    for (const p of pockets) {
-      opts.push({
-        value: `pocket:${p.id}`,
-        title: p.name,
-        subtitle: p.is_jar ? 'Jar' : 'Pocket',
-      });
-    }
-    return opts;
-  }, [pockets, jarPocket]);
-
-  const scopeDisplay = useMemo(() => {
-    const o = scopeOptions.find((x) => x.value === scopeKey);
-    return o ? `${o.title}${o.subtitle ? ` — ${o.subtitle}` : ''}` : '';
-  }, [scopeOptions, scopeKey]);
-
-  const scopeShortLabel = useMemo(() => {
-    const o = scopeOptions.find((x) => x.value === scopeKey);
-    return o?.title ?? 'All pockets';
-  }, [scopeOptions, scopeKey]);
-
-  /** Categories never apply to transfers, so a category filter narrows the same charts down to
-   *  "this category's income/expense only" — transfers simply drop out of every total. */
-  const categoryFilter = useMemo((): CategoryFilter => {
-    if (categoryFilterKey === 'uncategorized') return { mode: 'uncategorized' };
-    if (categoryFilterKey.startsWith('cat:')) {
-      return { mode: 'one', categoryId: categoryFilterKey.slice('cat:'.length) };
-    }
-    return { mode: 'all' };
-  }, [categoryFilterKey]);
-
-  const categoryFilterOptions = useMemo(
-    () => [
-      { value: 'all', title: 'All categories' },
-      { value: 'uncategorized', title: 'Uncategorized' },
-      ...categories.map((c) => ({ value: `cat:${c.id}`, title: c.name })),
-    ],
-    [categories]
-  );
-
-  const categoryFilterDisplay = useMemo(() => {
-    if (categoryFilterKey === 'all') return 'All categories';
-    if (categoryFilterKey === 'uncategorized') return 'Uncategorized';
-    const cat = categories.find((c) => `cat:${c.id}` === categoryFilterKey);
-    return cat?.name ?? 'Category';
-  }, [categoryFilterKey, categories]);
-
-  const assetOptions = useMemo(
-    () => assetTypes.map((a) => ({ value: a.code, title: a.code, subtitle: assetSubtitle(a.code, a.name) })),
-    [assetTypes]
-  );
-
-  const assetDisplay = useMemo(() => {
-    const a = assetTypes.find((t) => t.code === currency);
-    return a ? assetLabel(a.code, a.name) : currency;
-  }, [assetTypes, currency]);
-
+  // Home's per-asset Statistics button opens this screen on that asset.
+  const initialCurrency = route.params?.initialCurrency;
   useEffect(() => {
-    if (scopeKey === 'exclude_jar' && (!jarPocket || jarPocket.archived)) {
-      setScopeKey('all');
-    }
-  }, [jarPocket, scopeKey]);
+    const code = typeof initialCurrency === 'string' ? initialCurrency.trim().toUpperCase() : '';
+    if (!code) return;
+    setStatisticsSelection({ currency: code });
+    navigation.setParams({ initialCurrency: undefined });
+  }, [initialCurrency, navigation]);
 
-  useEffect(() => {
-    if (
-      categoryFilterKey.startsWith('cat:') &&
-      !categories.some((c) => `cat:${c.id}` === categoryFilterKey)
-    ) {
-      setCategoryFilterKey('all');
-    }
-  }, [categories, categoryFilterKey]);
-
-  const loadCharts = useCallback(async () => {
-    setLineLoading(true);
-    activePointRef.current = null;
-    setActivePoint(null);
-    try {
-      const endMs = Date.now();
-      const { startMs, endMs: e } = resolveTimeRange(rangeValue, endMs, earliest);
-      setRangeMeta({ startMs, endMs: e });
-
-      if (!currency) {
-        setLinePoints([]);
-        setPieSlices([]);
-        setCategoryExpenseSlices([]);
-        setCategoryIncomeSlices([]);
-        return;
-      }
-
-      const raw = await getBalanceTimeline(currency, statisticsScope, startMs, e, categoryFilter);
-      const sampled = downsampleTimeline(raw, MAX_LINE_POINTS);
-      setLinePoints(sampled);
-
-      const showPie = statisticsScope.mode === 'all' || statisticsScope.mode === 'exclude_jar';
-      if (showPie) {
-        const slices = await getPocketSlicesAt(
-          currency,
-          e,
-          { jarId: jarPocket?.id ?? null, excludeJar: statisticsScope.mode === 'exclude_jar' },
-          categoryFilter
-        );
-        setPieSlices(slices);
-      } else {
-        setPieSlices([]);
-      }
-
-      // Breaking a single category down "by category" is trivial (one slice), so these cards
-      // are only meaningful when no category filter narrows the data first.
-      if (categoryFilter.mode === 'all') {
-        const categorySlices = await getCategorySlices(currency, statisticsScope, startMs, e);
-        setCategoryExpenseSlices(categorySlices.expense);
-        setCategoryIncomeSlices(categorySlices.income);
-      } else {
-        setCategoryExpenseSlices([]);
-        setCategoryIncomeSlices([]);
-      }
-    } catch (e) {
-      Alert.alert('Could not load', e instanceof Error ? e.message : String(e));
-    } finally {
-      setLineLoading(false);
-    }
-  }, [currency, statisticsScope, categoryFilter, rangeValue, earliest, jarPocket]);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadCharts();
-    }, [loadCharts])
-  );
-
-  const lineChartData = useMemo(() => {
-    if (linePoints.length === 0) return [];
-    const withLabels = linePoints.map((p) => ({
-      value: p.balance_minor,
-      /** Carried through to pointer tooltip (library forwards the data item). */
-      timestamp: p.at,
-    }));
-    if (withLabels.length === 1) {
-      const first = withLabels[0];
-      return [
-        first,
-        {
-          value: first.value,
-          timestamp: rangeMeta.endMs,
-        },
-      ];
-    }
-    return withLabels;
-  }, [linePoints, rangeMeta.endMs]);
-
-  /**
-   * Gifted LineChart total plot width = initialSpacing + (spacing * n) + endSpacing
-   * for n points (it sums one spacing per point). We solve for spacing so the line fits `lineAreaW`.
-   */
-  const lineLayout = useMemo(() => {
-    const fallbackW = Math.max(260, winW - 32);
-    const rowW = chartRowWidth > 40 ? chartRowWidth : fallbackW;
-    const lineAreaW = Math.max(80, rowW - Y_AXIS_LABEL_WIDTH);
-    const n = lineChartData.length;
-    const spacing =
-      n > 0
-        ? Math.max(
-            1,
-            (lineAreaW - CHART_INITIAL_SPACING - CHART_END_SPACING) / Math.max(n, 1)
-          )
-        : 8;
-    return {
-      lineAreaW,
-      spacing,
-      rowW,
-    };
-  }, [chartRowWidth, winW, lineChartData.length]);
-
-  /** Start, middle and end dates, drawn under the chart as one row: the library wraps a label to the width of one data step. */
-  const xAxisDates = useMemo(() => {
-    const n = lineChartData.length;
-    if (n === 0) return [];
-    const at = (i: number) => axisDateLabel(lineChartData[i]!.timestamp);
-    return n > 2 ? [at(0), at(Math.floor(n / 2)), at(n - 1)] : [at(0), at(n - 1)];
-  }, [lineChartData]);
-
-  const lineScale = useMemo(() => computeLineChartScale(linePoints), [linePoints]);
-
-  /** The chart is drawn, so a screen reader gets its shape as one sentence instead. */
-  const lineChartSummary = useMemo(() => {
-    if (linePoints.length === 0) return '';
-    const values = linePoints.map((p) => p.balance_minor);
-    const first = values[0]!;
-    const last = values[values.length - 1]!;
-    const lowest = values.reduce((a, v) => (v < a ? v : a), first);
-    const highest = values.reduce((a, v) => (v > a ? v : a), first);
-    const fmt = (v: number) => formatMinorForDisplay(v, currency);
-    return `Line chart, ${currency}, from ${axisDateLabel(rangeMeta.startMs)} to ${axisDateLabel(rangeMeta.endMs)}. Starts at ${fmt(first)}, ends at ${fmt(last)}, lowest ${fmt(lowest)}, highest ${fmt(highest)}.`;
-  }, [linePoints, currency, rangeMeta.startMs, rangeMeta.endMs]);
-
-  const positiveSlices = useMemo(
-    () => pieSlices.filter((s) => s.balance_minor > 0n),
-    [pieSlices]
-  );
-  const negativeSlices = useMemo(
-    () => pieSlices.filter((s) => s.balance_minor < 0n),
-    [pieSlices]
-  );
-
-  /** Falls back to the negative side when nothing is positive — the normal case once a category
-   *  filter narrows this down to an expense-only category, where every pocket's total is negative. */
-  const pieIsNegative = positiveSlices.length === 0 && negativeSlices.length > 0;
-  const pieDisplaySlices = pieIsNegative ? negativeSlices : positiveSlices;
-
-  const pocketDonutSlices = useMemo<DonutSlice[]>(() => {
-    const total = pieDisplaySlices.reduce((a, sl) => a + sl.balance_minor, 0n);
-    const colorById = assignChartColors(pieDisplaySlices.map((sl) => sl.pocketId), chartPalette);
-    return pieDisplaySlices.map((sl) => ({
-      key: sl.pocketId,
-      name: sl.name,
-      color: colorById.get(sl.pocketId)!,
-      // The donut only needs the proportions, so a float is fine here.
-      value: Math.abs(Number(sl.balance_minor)),
-      amountText: formatMinorForDisplay(sl.balance_minor, currency),
-      shareText: formatShare(sl.balance_minor, total),
-    }));
-  }, [pieDisplaySlices, chartPalette, currency]);
-
-  const pieTotal = useMemo(
-    () => pieDisplaySlices.reduce((a, s) => a + s.balance_minor, 0n),
-    [pieDisplaySlices]
-  );
-
-  const showPieSection =
-    (statisticsScope.mode === 'all' || statisticsScope.mode === 'exclude_jar') &&
-    pieDisplaySlices.length > 0 &&
-    pieTotal !== 0n;
-
-  const categoryColors = useMemo(
-    () =>
-      assignChartColors(
-        [...categoryExpenseSlices, ...categoryIncomeSlices].flatMap((sl) => (sl.categoryId ? [sl.categoryId] : [])),
-        chartPalette
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable
+          onPress={() => navigation.navigate('ReportExport')}
+          hitSlop={HIT_SLOP}
+          accessibilityRole="button"
+          accessibilityLabel="Export report"
+          style={styles.headerAction}
+        >
+          <Text style={styles.headerActionText}>Export</Text>
+        </Pressable>
       ),
-    [categoryExpenseSlices, categoryIncomeSlices, chartPalette]
+    });
+  }, [navigation, styles]);
+
+  /** Bumped on every focus, so numbers edited elsewhere (History, a transaction) show up. */
+  const [refreshKey, setRefreshKey] = useState(0);
+  useFocusEffect(
+    useCallback(() => {
+      setRefreshKey((k) => k + 1);
+    }, [])
   );
 
-  const categoryDonutSlices = useCallback(
-    (slices: CategorySlice[]): DonutSlice[] => {
-      const total = slices.reduce((a, sl) => a + sl.total_minor, 0);
-      return slices.map((sl) => ({
-        key: sl.categoryId ?? '__uncategorized__',
-        name: sl.name,
-        color:
-          resolveStoredColor(sl.color, chartPalette) ??
-          (sl.categoryId ? categoryColors.get(sl.categoryId) : undefined) ??
-          colors.textMuted,
-        value: sl.total_minor,
-        amountText: formatMinorForDisplay(sl.total_minor, currency),
-        shareText: formatShare(sl.total_minor, total),
-      }));
-    },
-    [chartPalette, categoryColors, colors.textMuted, currency]
-  );
+  const [data, setData] = useState<Loaded | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const loadSeq = useRef(0);
+  /** How many months the user has opened up for the current selection; a refresh reloads them all. */
+  const monthCount = useRef({ selectionKey: '', count: PAGE_MONTHS });
 
-  const expenseDonutSlices = useMemo(
-    () => categoryDonutSlices(categoryExpenseSlices),
-    [categoryDonutSlices, categoryExpenseSlices]
-  );
-  const expensePieTotal = useMemo(
-    () => categoryExpenseSlices.reduce((a, s) => a + s.total_minor, 0),
-    [categoryExpenseSlices]
-  );
+  useEffect(() => {
+    if (!ready || !currency) return;
+    const seq = ++loadSeq.current;
+    if (monthCount.current.selectionKey !== selectionKey) {
+      monthCount.current = { selectionKey, count: PAGE_MONTHS };
+    }
+    const months = monthsEndingAt(monthOf(Date.now()).key, monthCount.current.count);
+    setLoading(true);
+    setError(false);
+    void (async () => {
+      try {
+        const [flows, firstActivityAt] = await Promise.all([
+          loadFlows(currency, scope, months),
+          getFirstActivityAt(currency, scope),
+        ]);
+        if (seq !== loadSeq.current) return;
+        setData({ selectionKey, months, flows, firstActivityAt });
+      } catch {
+        if (seq === loadSeq.current) setError(true);
+      } finally {
+        if (seq === loadSeq.current) setLoading(false);
+      }
+    })();
+  }, [ready, currency, scope, selectionKey, refreshKey]);
 
-  const incomeDonutSlices = useMemo(
-    () => categoryDonutSlices(categoryIncomeSlices),
-    [categoryDonutSlices, categoryIncomeSlices]
-  );
-  const incomePieTotal = useMemo(
-    () => categoryIncomeSlices.reduce((a, s) => a + s.total_minor, 0),
-    [categoryIncomeSlices]
-  );
+  const current = data && data.selectionKey === selectionKey ? data : null;
+  const firstKey = current?.firstActivityAt != null ? monthOf(current.firstActivityAt).key : null;
+  const oldestKey = current?.months[0]?.key ?? null;
+  const canLoadEarlier = !!firstKey && !!oldestKey && firstKey < oldestKey;
 
-  const categoryFilterSuffix =
-    categoryFilter.mode === 'all' ? '' : ` · ${categoryFilterDisplay} only`;
-
-  const toggleSettingsExpanded = () => {
-    animateNextLayout();
-    setSettingsExpanded((v) => !v);
+  const loadEarlier = async () => {
+    // A refresh in flight would replace the months this adds, so wait for it.
+    if (!current || !currency || !oldestKey || loadingEarlier || loading) return;
+    const seq = loadSeq.current;
+    const months = monthsEndingAt(shiftMonthKey(oldestKey, -1), PAGE_MONTHS);
+    setLoadingEarlier(true);
+    try {
+      const flows = await loadFlows(currency, scope, months);
+      if (seq !== loadSeq.current) return;
+      monthCount.current = { selectionKey, count: monthCount.current.count + PAGE_MONTHS };
+      setData((prev) =>
+        prev && prev.selectionKey === selectionKey
+          ? { ...prev, months: [...months, ...prev.months], flows: [...flows, ...prev.flows] }
+          : prev
+      );
+    } catch {
+      if (seq === loadSeq.current) setError(true);
+    } finally {
+      setLoadingEarlier(false);
+    }
   };
 
-  const timeRangeShortLabel = useMemo(() => formatTimeRangeLabel(rangeValue), [rangeValue]);
-
-  const settingsChips = useMemo(
-    () => [
-      { key: 'asset', label: currency || 'Asset' },
-      { key: 'scope', label: scopeShortLabel },
-      { key: 'category', label: categoryFilterDisplay },
-      { key: 'range', label: timeRangeShortLabel },
-    ],
-    [currency, scopeShortLabel, categoryFilterDisplay, timeRangeShortLabel]
+  const summaries = useMemo(
+    () => (current ? summarizeMonths(current.flows, current.months.map((m) => m.key)) : new Map()),
+    [current]
   );
+
+  const currentMonthKey = current?.months[current.months.length - 1]?.key ?? null;
+
+  const bars = useMemo((): MonthBars[] => {
+    if (!current) return [];
+    return current.months.slice(-PAGE_MONTHS).map((m) => {
+      const s = summaries.get(m.key)!;
+      // The bar lengths only need the proportions, so a float is fine here.
+      return { key: m.key, label: monthAbbrev(m.key), income: Number(s.income), expense: Number(s.expense) };
+    });
+  }, [current, summaries]);
+
+  /** Newest first, from the month of the first transaction in this scope on. */
+  const listMonths = useMemo(() => {
+    if (!current || !firstKey) return [];
+    return current.months
+      .map((m) => m.key)
+      .filter((k) => k >= firstKey)
+      .reverse();
+  }, [current, firstKey]);
+
+  const openMonth = (monthKey: string) => navigation.navigate('StatisticsMonth', { monthKey });
+  const fmt = (minor: bigint) => (currency ? formatMinorAmountForDisplay(minor, currency) : '');
+
+  const barsSummary =
+    bars.length > 0
+      ? `Income and expense per month, ${monthLongLabel(bars[0]!.key)} to ${monthLongLabel(bars[bars.length - 1]!.key)}. The month list below has the numbers.`
+      : '';
 
   return (
     <ScreenWithFooter>
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.inner}>
-      <Text style={styles.lead}>
-        One asset at a time. Transfers are not counted in totals or categories.
-      </Text>
-
-      <Pressable
-        style={styles.exportBtn}
-        onPress={() => navigation.navigate('ReportExport')}
-        accessibilityRole="button"
-      >
-        <Text style={styles.exportBtnText}>Export report…</Text>
-      </Pressable>
-
-      {assetTypes.length === 0 ? (
-        <Text style={styles.muted}>Add asset types under Settings to use Statistics.</Text>
-      ) : (
-        <View style={styles.settingsSection}>
-          <Pressable style={styles.settingsHeaderRow} onPress={toggleSettingsExpanded}>
-            <Text style={styles.settingsSectionTitle}>Statistics settings</Text>
-            <Text style={styles.settingsChevron}>{settingsExpanded ? '▴' : '▾'}</Text>
-          </Pressable>
-
-          {!settingsExpanded ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.settingsChipRow}
-            >
-              {settingsChips.map((chip) => (
-                <Pressable key={chip.key} style={styles.settingsChip} onPress={toggleSettingsExpanded}>
-                  <Text style={styles.settingsChipText} numberOfLines={1}>
-                    {chip.label}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-          ) : (
-            <View style={styles.settingsFields}>
-              <ModalSelectField
-                label="Asset"
-                displayValue={assetDisplay}
-                placeholder="Select asset"
-                modalTitle="Asset"
-                options={assetOptions}
-                onSelect={setCurrency}
-                emptyMessage="No asset types."
-              />
-              <ModalSelectField
-                label="Scope"
-                displayValue={scopeDisplay}
-                placeholder="Select scope"
-                modalTitle="Balance scope"
-                options={scopeOptions}
-                onSelect={(v) => {
-                  if (v === 'exclude_jar' && !jarPocket) return;
-                  setScopeKey(v);
-                }}
-                disabled={scopeOptions.length === 0}
-              />
-              <ModalSelectField
-                label="Category"
-                displayValue={categoryFilterDisplay}
-                placeholder="Select category"
-                modalTitle="Category"
-                options={categoryFilterOptions}
-                onSelect={setCategoryFilterKey}
-                emptyMessage="No categories yet."
-              />
-              <TimeRangePickerField
-                label="Time range"
-                value={rangeValue}
-                onChange={setRangeValue}
-                earliestMs={earliest}
-              />
-            </View>
-          )}
-        </View>
-      )}
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>
-          {categoryFilter.mode === 'all' ? 'Balance over time' : 'Category total over time'}
-        </Text>
-        <Text style={styles.cardSub}>
-          {axisDateLabel(rangeMeta.startMs)} → {axisDateLabel(rangeMeta.endMs)} · {currency}
-          {categoryFilterSuffix}
-        </Text>
-        {lineLoading ? (
-          <View style={styles.chartLoading}>
-            <ActivityIndicator color={colors.primary} />
-          </View>
-        ) : lineChartData.length === 0 ? (
-          <Text style={styles.muted}>No data in this range.</Text>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.inner}>
+        {ready && !selection.hasAssets ? (
+          <Text style={styles.muted}>Add asset types under Settings to use Statistics.</Text>
         ) : (
-          <View
-            style={styles.chartWrap}
-            onLayout={(e) => {
-              const w = Math.round(e.nativeEvent.layout.width);
-              if (w > 0 && Math.abs(w - chartRowWidth) > 2) {
-                setChartRowWidth(w);
-              }
-            }}
-          >
-            <View style={styles.readoutRow}>
-              {activePoint ? (
-                <>
-                  <Text style={styles.readoutDate}>{formatOccurredAt(activePoint.ts)}</Text>
-                  <Text style={styles.readoutAmt}>
-                    {formatMinorForDisplay(activePoint.v, currency)}
-                  </Text>
-                </>
-              ) : (
-                <Text style={styles.axisHint}>
-                  Tap the chart for date and balance.
-                </Text>
-              )}
-            </View>
-            <View
-              accessible
-              accessibilityRole="image"
-              accessibilityLabel={lineChartSummary}
-              importantForAccessibility="no-hide-descendants"
-            >
-              <LineChart
-                data={lineChartData}
-                parentWidth={lineLayout.rowW}
-                width={lineLayout.lineAreaW}
-                height={220}
-                spacing={lineLayout.spacing}
-                initialSpacing={CHART_INITIAL_SPACING}
-                endSpacing={CHART_END_SPACING}
-                adjustToWidth={false}
-                curved={false}
-                areaChart
-                hideDataPoints
-                thickness={2}
-                color={colors.primary}
-                startFillColor={colors.primary}
-                endFillColor={colors.primary}
-                startOpacity={0.25}
-                endOpacity={0.02}
-                yAxisThickness={0}
-                xAxisThickness={1}
-                xAxisColor={colors.textMuted}
-                rulesType="solid"
-                rulesColor={colors.border}
-                noOfSections={LINE_NO_OF_SECTIONS}
-                maxValue={lineScale.maxValue}
-                stepValue={lineScale.stepValue}
-                mostNegativeValue={lineScale.mostNegativeValue}
-                noOfSectionsBelowXAxis={lineScale.noOfSectionsBelowXAxis}
-                yAxisTextStyle={{ color: colors.textMuted, fontSize: 12, fontFamily: font.regular }}
-                  yAxisLabelWidth={Y_AXIS_LABEL_WIDTH}
-                formatYLabel={formatYAxisMajorLabel}
-                  pointerConfig={{
-                  pointerStripColor: colors.border,
-                  pointerStripWidth: 1,
-                  pointerColor: colors.primary,
-                  radius: 5,
-                  activatePointersOnLongPress: false,
-                  activatePointersInstantlyOnTouch: true,
-                  persistPointer: true,
-                  resetPointerIndexOnRelease: false,
-                  // No floating label box (see `readoutRow` above the chart) — this callback only
-                  // reports the touched point's data into React state. It fires during the chart
-                  // library's own render pass, so the update is deferred a tick (requestAnimationFrame)
-                  // rather than calling setState synchronously while a different component renders.
-                  pointerLabelComponent: (
-                    items: { value: number; timestamp?: number }[] | undefined,
-                    _secondary: unknown,
-                    pointerIndex: unknown
-                  ) => {
-                    const it = items?.[0];
-                    if (!it) return null;
-                    const v = Math.round(Number(it.value));
-                    const idx = typeof pointerIndex === 'number' ? pointerIndex : 0;
-                    const ts =
-                      typeof it.timestamp === 'number'
-                        ? it.timestamp
-                        : typeof lineChartData[idx]?.timestamp === 'number'
-                          ? lineChartData[idx].timestamp
-                          : null;
-                    if (ts != null && (activePointRef.current?.ts !== ts || activePointRef.current?.v !== v)) {
-                      const next = { ts, v };
-                      activePointRef.current = next;
-                      requestAnimationFrame(() => setActivePoint(next));
-                    }
-                    return null;
-                  },
-                }}
-              />
-            </View>
-            <View
-              style={[
-                styles.xAxisRow,
-                { marginLeft: Y_AXIS_LABEL_WIDTH + CHART_INITIAL_SPACING, width: lineLayout.lineAreaW },
-              ]}
-              accessibilityElementsHidden
-              importantForAccessibility="no-hide-descendants"
-            >
-              {xAxisDates.map((d, i) => (
-                <Text
-                  key={i}
-                  style={[
-                    styles.xAxisLabel,
-                    i === 0 ? styles.xAxisFirst : i === xAxisDates.length - 1 ? styles.xAxisLast : null,
-                  ]}
-                  maxFontSizeMultiplier={1.2}
-                >
-                  {d}
-                </Text>
-              ))}
-            </View>
-          </View>
+          <>
+            <StatisticsChips selection={selection} />
+
+            {!current && loading ? (
+              <View style={styles.loading}>
+                <ActivityIndicator color={colors.primary} />
+              </View>
+            ) : error ? (
+              <Text style={[styles.error, styles.block]}>Could not read the ledger. Try again.</Text>
+            ) : current && current.firstActivityAt === null ? (
+              <Text style={[styles.muted, styles.block]}>
+                {scopeKey === 'all'
+                  ? `No ${currency} transactions yet.`
+                  : `No ${currency} transactions in ${selection.scopeLabel} yet.`}
+              </Text>
+            ) : current ? (
+              <>
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Last 12 months</Text>
+                  <Text style={styles.cardSub}>{currency} · transfers not counted</Text>
+                  <MonthlyBarsChart
+                    months={bars}
+                    incomeColor={chartPalette[1]!}
+                    expenseColor={chartPalette[0]!}
+                    onPressMonth={openMonth}
+                    summary={barsSummary}
+                  />
+                </View>
+
+                <Text style={styles.sectionLabel}>MONTHS</Text>
+                <View style={styles.list}>
+                  {listMonths.map((key, i) => {
+                    const s = summaries.get(key)!;
+                    const soFar = key === currentMonthKey ? ' (so far)' : '';
+                    return (
+                      <Pressable
+                        key={key}
+                        style={({ pressed }) => [styles.row, i > 0 && styles.rowDivider, pressed && styles.rowPressed]}
+                        onPress={() => openMonth(key)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${monthLongLabel(key)}${soFar}, net ${signedAmount(s.net, currency!)}, income ${fmt(s.income)}, expense ${fmt(s.expense)}`}
+                      >
+                        <View style={styles.rowHead}>
+                          <Text style={styles.rowMonth}>
+                            {monthShortLabel(key)}
+                            {soFar ? <Text style={styles.rowSoFar}>{soFar}</Text> : null}
+                          </Text>
+                          <Text style={styles.rowNet}>net {signedAmount(s.net, currency!)}</Text>
+                          <Text style={styles.rowChevron}>›</Text>
+                        </View>
+                        <Text style={styles.rowDetail}>
+                          in {fmt(s.income)} · out {fmt(s.expense)}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {canLoadEarlier ? (
+                  <Pressable
+                    style={styles.moreBtn}
+                    onPress={() => void loadEarlier()}
+                    disabled={loadingEarlier || loading}
+                    accessibilityRole="button"
+                    accessibilityState={{ busy: loadingEarlier, disabled: loadingEarlier || loading }}
+                  >
+                    {loadingEarlier ? (
+                      <ActivityIndicator color={colors.primary} />
+                    ) : (
+                      <Text style={styles.moreText}>Show earlier months</Text>
+                    )}
+                  </Pressable>
+                ) : null}
+              </>
+            ) : null}
+
+            {current && currency ? (
+              <BalanceTrendCard currency={currency} scope={scope} refreshKey={refreshKey} />
+            ) : null}
+          </>
         )}
-      </View>
-
-      {showPieSection ? (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>
-            {pieIsNegative ? 'Pocket mix (negative)' : 'Pocket mix at period end'}
-          </Text>
-          <Text style={styles.cardSub}>
-            {pieIsNegative
-              ? `Negative ${currency} balance by pocket`
-              : `${currency} balance by pocket`}
-            {categoryFilterSuffix}
-          </Text>
-          <DonutChart
-            slices={pocketDonutSlices}
-            centerText={formatMinorAmountForDisplay(pieTotal, currency)}
-            centerSub={currency}
-          />
-        </View>
-      ) : !lineLoading && statisticsScope.mode !== 'pocket' ? (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Pocket mix</Text>
-          <Text style={styles.muted}>No balances to show for this asset at the end of the range.</Text>
-        </View>
-      ) : statisticsScope.mode === 'pocket' ? (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Pocket mix</Text>
-          <Text style={styles.muted}>
-            Choose All pockets or Outside Jar to see this chart.
-          </Text>
-        </View>
-      ) : null}
-
-      {!lineLoading && currency && categoryFilter.mode === 'all' ? (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Spending by category</Text>
-          <Text style={styles.cardSub}>
-            {axisDateLabel(rangeMeta.startMs)} → {axisDateLabel(rangeMeta.endMs)} · {currency}
-          </Text>
-          {expenseDonutSlices.length === 0 ? (
-            <Text style={styles.muted}>No categorized expenses in this range.</Text>
-          ) : (
-            <DonutChart
-              slices={expenseDonutSlices}
-              centerText={formatMinorAmountForDisplay(expensePieTotal, currency)}
-              centerSub={currency}
-            />
-          )}
-        </View>
-      ) : null}
-
-      {!lineLoading && currency && categoryFilter.mode === 'all' ? (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Income by category</Text>
-          <Text style={styles.cardSub}>
-            {axisDateLabel(rangeMeta.startMs)} → {axisDateLabel(rangeMeta.endMs)} · {currency}
-          </Text>
-          {incomeDonutSlices.length === 0 ? (
-            <Text style={styles.muted}>No categorized income in this range.</Text>
-          ) : (
-            <DonutChart
-              slices={incomeDonutSlices}
-              centerText={formatMinorAmountForDisplay(incomePieTotal, currency)}
-              centerSub={currency}
-            />
-          )}
-        </View>
-      ) : null}
-    </ScrollView>
+      </ScrollView>
     </ScreenWithFooter>
   );
 }
@@ -811,51 +261,14 @@ function createStyles(c: AppColors) {
   return StyleSheet.create({
     scroll: { flex: 1, backgroundColor: c.bg },
     inner: { paddingVertical: 16, paddingHorizontal: 16, paddingBottom: 40 },
-    lead: { fontSize: 14, color: c.textMuted, lineHeight: 21, marginBottom: 16 },
-    exportBtn: {
-      backgroundColor: c.surface,
-      paddingVertical: 12,
-      borderRadius: 10,
-      alignItems: 'center',
-      borderWidth: 1,
-      borderColor: c.borderStrong,
-      marginBottom: 16,
-    },
-    exportBtnText: { color: c.primary, fontFamily: font.semibold, fontSize: 15 },
-    cardLabel: { fontSize: 13, fontFamily: font.semibold, color: c.textMuted, marginBottom: 8 },
+    headerAction: { marginRight: 6 },
+    headerActionText: { color: c.primary, fontFamily: font.semibold, fontSize: 15 },
     muted: { fontSize: 14, color: c.textMuted, lineHeight: 20 },
-    settingsSection: {
-      backgroundColor: c.chipBg,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: c.jarSoftBorder,
-      paddingHorizontal: 14,
-      paddingTop: 10,
-      paddingBottom: 10,
-      marginBottom: 4,
-    },
-    settingsHeaderRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingVertical: 4,
-    },
-    settingsSectionTitle: { fontSize: 13, fontFamily: font.semibold, color: c.primary },
-    settingsChevron: { fontSize: 22, color: c.primary, fontFamily: font.semibold, lineHeight: 22 },
-    settingsChipRow: { flexDirection: 'row', gap: 6, marginTop: 6, paddingRight: 8 },
-    settingsChip: {
-      backgroundColor: c.surface,
-      borderWidth: 1,
-      borderColor: c.jarSoftBorder,
-      borderRadius: 20,
-      paddingHorizontal: 12,
-      paddingVertical: 6,
-      maxWidth: 160,
-    },
-    settingsChipText: { fontSize: 12, color: c.textSecondary, fontFamily: font.semibold },
-    settingsFields: { marginTop: 8, gap: 4 },
+    error: { fontSize: 14, color: c.danger, lineHeight: 20 },
+    block: { marginTop: 20 },
+    loading: { height: 200, justifyContent: 'center', alignItems: 'center' },
     card: {
-      marginTop: 20,
+      marginTop: 16,
       backgroundColor: c.surface,
       borderRadius: 14,
       paddingVertical: 12,
@@ -865,31 +278,24 @@ function createStyles(c: AppColors) {
     },
     cardTitle: { fontFamily: font.bold, fontSize: 17, color: c.text },
     cardSub: { fontSize: 13, color: c.textMuted, marginTop: 4, marginBottom: 12 },
-    chartLoading: { height: 220, justifyContent: 'center', alignItems: 'center' },
-    chartWrap: {
-      alignSelf: 'stretch',
-      marginTop: 4,
+    sectionLabel: { fontSize: 13, fontFamily: font.semibold, color: c.primary, marginTop: 24, marginBottom: 8 },
+    list: {
+      backgroundColor: c.surface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.border,
+      overflow: 'hidden',
     },
-    /** Fixed-position readout for the touched point — normal layout flow, not an absolutely
-     *  positioned overlay, so it can't be clipped by Android's ScrollView view-flattening the
-     *  way a floating chart-library tooltip was. */
-    readoutRow: {
-      flexDirection: 'row',
-      alignItems: 'baseline',
-      gap: 8,
-      minHeight: 18,
-      marginBottom: 10,
-    },
-    xAxisRow: { flexDirection: 'row', marginTop: 6 },
-    xAxisLabel: { flex: 1, fontSize: 12, color: c.textMuted, textAlign: 'center' },
-    xAxisFirst: { textAlign: 'left' },
-    xAxisLast: { textAlign: 'right' },
-    axisHint: {
-      fontSize: 12,
-      color: c.textMuted,
-      lineHeight: 16,
-    },
-    readoutDate: { fontSize: 12, color: c.textMuted },
-    readoutAmt: { fontSize: 14, fontFamily: font.semibold, color: c.text },
+    row: { paddingVertical: 12, paddingHorizontal: 12 },
+    rowDivider: { borderTopWidth: 1, borderTopColor: c.border },
+    rowPressed: { backgroundColor: c.surfaceMuted },
+    rowHead: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+    rowMonth: { flex: 1, fontFamily: font.semibold, fontSize: 15, color: c.text },
+    rowSoFar: { fontFamily: font.regular, fontSize: 13, color: c.textMuted },
+    rowNet: { fontFamily: font.semibold, fontSize: 14, color: c.text },
+    rowChevron: { fontSize: 18, color: c.textMuted },
+    rowDetail: { fontSize: 13, color: c.textSecondary, marginTop: 4 },
+    moreBtn: { paddingVertical: 14, alignItems: 'center' },
+    moreText: { fontSize: 14, fontFamily: font.semibold, color: c.primary },
   });
 }

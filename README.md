@@ -13,7 +13,7 @@ Local-first personal finance app: **pockets** (budget segments), **multi-currenc
 | **Runtime** | Expo SDK `~55`, React Native `0.83`, React `19`, TypeScript `strict` |
 | **Entry** | `index.ts` → `App.tsx` (fonts) → `AppBoot.tsx` (vault gate + main UI) |
 | **Architecture** | New Architecture enabled (`newArchEnabled: true` in `app.json`) |
-| **Implemented** | **Vault** (PBKDF2 + AES-GCM wrapped DEK, SQLCipher, lock on background). **Schema** migrations **`0001`–`0008`** (auto-applied on unlock). **Repositories:** `pockets`, `transactions`, `settings`, `assetTypes`, `categories`, `jar`, `jarAdvanced`, `statistics`. **UI:** Home (balances by currency, Jar shortcut), Pockets + pocket detail, **History** (collapsible multi-filter panel — Type / Asset / Pocket / **Category**, tap-to-toggle, summary chips when collapsed), **Statistics** (collapsible **settings panel** — Asset / Scope / **Category filter** / Time range — plus balance-over-time, pocket mix with a **negative-balance fallback**, **per-category income/expense breakdown**, and a fixed-position chart value readout), **Settings** (appearance, Jar toggles, archived pockets, **screenshot block**, **categories**, **encrypted backup**), asset-type catalog, **category catalog** (optional per-transaction tag), transaction editor. **Jar:** Record income, Distribute (basic or Advanced rules), Jar split screen, recent Jar transactions. **Advanced Jar:** hub + per-asset **visual editor** (Balance Chart, split preview bar, milestone knots). **`ModalSelectField`** everywhere including **multi-select** filter sheets (tap toggles a checkmark and keeps the sheet open; tapping "All" clears and closes). **Themes:** six accent palettes + dark mode; **unlock screen** uses cached appearance. **Support:** BTC donation address on Home. **Encrypted `.tarcak` backup** export/import. |
+| **Implemented** | **Vault** (PBKDF2 + AES-GCM wrapped DEK, SQLCipher, lock on background). **Schema** migrations **`0001`–`0008`** (auto-applied on unlock). **Repositories:** `pockets`, `transactions`, `settings`, `assetTypes`, `categories`, `jar`, `jarAdvanced`, `statistics`. **UI:** Home (balances by currency, Jar shortcut), Pockets + pocket detail, **History** (collapsible multi-filter panel — Type / Asset / Pocket / **Category**, tap-to-toggle, summary chips when collapsed), **Statistics** (month-based: 12-month income/expense bars and a month list, a **month screen** with income/expense tiles, the 12-month average, the month-end balance and a ranked breakdown by category or pocket that opens the matching transactions in History; balance-over-time at the bottom), **Settings** (appearance, Jar toggles, archived pockets, **screenshot block**, **categories**, **encrypted backup**), asset-type catalog, **category catalog** (optional per-transaction tag), transaction editor. **Jar:** Record income, Distribute (basic or Advanced rules), Jar split screen, recent Jar transactions. **Advanced Jar:** hub + per-asset **visual editor** (Balance Chart, split preview bar, milestone knots). **`ModalSelectField`** everywhere including **multi-select** filter sheets (tap toggles a checkmark and keeps the sheet open; tapping "All" clears and closes). **Themes:** six accent palettes + dark mode; **unlock screen** uses cached appearance. **Support:** BTC donation address on Home. **Encrypted `.tarcak` backup** export/import. |
 | **Still to add** | Polish (**editable** `occurred_at` in the transaction editor; pocket rename UX), automated tests beyond CI typecheck + `test:jar` checklist, optional FX / converted home total |
 
 ## Support / donations
@@ -61,7 +61,7 @@ Implementation: [`src/security/backup.ts`](src/security/backup.ts), [`src/securi
 
 ## Monthly report export (CSV)
 
-**Statistics → Export report…** (native only; disabled on web). A monthly income/expense summary as a CSV file for a spreadsheet.
+**Statistics → Export** (header button; native only, disabled on web). A monthly income/expense summary as a CSV file for a spreadsheet.
 
 - **What is in the file:** for each calendar month (device time zone) and each chosen currency, `month,currency,income,expense,net`; every month in the range gets a row (zeros when empty). Only `income` and `expense` count, never transfers. Currencies are never added together (no exchange rates). Amounts are exact decimals (BigInt end to end, no rounding, no digit grouping); `expense` is the positive size of the spending and `net = income − expense`.
 - **Optional category breakdown** (“Break down by category”, off by default): long form `month,currency,kind,category,amount`, non-zero sums only. This is the only place free text (category names) enters the file; text cells starting with `=`, `+`, `-`, `@`, tab or CR get a leading `'` against spreadsheet formula injection.
@@ -180,7 +180,7 @@ Amounts are stored as **signed integers**: **one major currency unit = 10⁸ min
 
 ### Category (optional transaction tag)
 
-Users define their own **categories** (e.g. “Groceries”, “Salary”) under **Settings → Categories**, each with an optional hex **color** swatch. A category can be attached to an **income** or **expense** transaction (optional — a transaction can have none); **transfers never carry a category** (enforced in `validateLedgerShape`, since it is not money in/out). `transactions.category_id` is a real FK to `categories.id` with **`ON DELETE SET NULL`**: deleting a category just uncategorizes the transactions that used it, it never blocks the delete. **History** can filter by category (including an “Uncategorized” bucket), and **Statistics** shows income/expense totals grouped by category for the selected asset, scope, and time range.
+Users define their own **categories** (e.g. “Groceries”, “Salary”) under **Settings → Categories**, each with an optional hex **color** swatch. A category can be attached to an **income** or **expense** transaction (optional — a transaction can have none); **transfers never carry a category** (enforced in `validateLedgerShape`, since it is not money in/out). `transactions.category_id` is a real FK to `categories.id` with **`ON DELETE SET NULL`**: deleting a category just uncategorizes the transactions that used it, it never blocks the delete. **History** can filter by category (including an “Uncategorized” bucket), and the **Statistics** month screen breaks a month's income or expense down by category.
 
 ### Jar (pool & distribute)
 
@@ -224,9 +224,9 @@ Each record has a **title** (short label), **amount** (non-zero integer in minor
 
 **Statistics screen** ([`StatisticsScreen.tsx`](src/screens/StatisticsScreen.tsx), [`statistics.ts`](src/db/repositories/statistics.ts)):
 
-- **Settings panel is collapsible** — Asset / Scope (pocket) / **Category filter** / Time range, same collapsed-by-default + summary-chip pattern as History's filters; all four have sensible defaults so charts render before you ever open it.
-- **Category filter** (`CategoryFilter`: all / uncategorized / one category) is a peer to the pocket **Scope** filter — it narrows the balance-over-time line, the pocket-mix donut, and their SQL queries down to just that category's income/expense rows (transfers never carry a category, so they drop out entirely once a category filter is active). The two "Spending/Income by category" breakdown cards hide themselves while a specific category is selected, since breaking one category down "by category" would just be a single trivial slice.
-- **Pocket mix** falls back to showing the **negative distribution** (magnitude-sized donut, real signed amounts in the legend/center label) when there are no positive pocket balances but there are negative ones — the normal case once you filter down to an expense-only category, where every pocket's total is negative.
+- **Two levels:** the overview ([`StatisticsScreen.tsx`](src/screens/StatisticsScreen.tsx)) shows the last 12 months as income/expense bars and a month list (net, in, out; "Show earlier months" adds 12); a month opens [`StatisticsMonthScreen.tsx`](src/screens/StatisticsMonthScreen.tsx). Asset and pocket scope are two chips shared by both screens, kept in memory only.
+- **Month screen:** the Income and Expense tiles choose what the breakdown shows; each carries the average of up to 12 earlier months since the first transaction (hidden with fewer than 3). Net and the month-end balance (transfers included, per scope) sit under the tiles. The breakdown is a ranked bar list by category or pocket; a row opens History on exactly the transactions behind it (`TransactionDrill`, no Jar pooling), so the listed amounts add up to the row. No donut: a negative total (refunds) stays a plain row.
+- **Queries:** month bounds travel in a `VALUES` CTE ([`monthlyStats.ts`](src/db/repositories/monthlyStats.ts)), so up to 24 months are one grouped query using the `occurred_at` index; the overview opens with two queries for the months (two more for the balance chart, which can be collapsed), the month screen with three, and a step to a month already read needs none. Pure logic (sums, average, breakdown, chart scale) is in [`src/domain/monthlyStats.ts`](src/domain/monthlyStats.ts).
 - **Balance-over-time chart** height is bounded even when the balance dips deep negative relative to its peak — `computeLineChartScale` caps how many extra sections gifted-charts can render below the zero line (`LINE_MAX_NEG_SECTIONS`), instead of trusting the library's default (`stepValue` derived only from the max value), which could otherwise blow the chart's rendered height up unboundedly.
 - **Touched-point readout** is a fixed row above the chart (date + amount), not a floating tooltip anchored to your finger — a floating, absolutely-positioned label from the chart library kept getting clipped by Android's ScrollView view-flattening whenever it needed to render outside its own box, regardless of z-index/elevation/`collapsable` tuning. A row in normal layout flow can't be clipped that way since nothing needs to escape its own bounds.
 
@@ -366,7 +366,7 @@ For each pocket `p` and currency `c`:
 - **Jar:** `listJarDistributionRules`, `replaceJarDistributionRules`, `distributeJarCurrency`, `splitAmountByBps` (pure helper).
 - **Jar advanced:** `listJarAdvancedSummaries`, `getJarAdvancedAssetDetail`, `saveJarAdvancedAsset`, `deleteJarAdvancedAsset`, `getJarAdvancedDistributeConfig`, `resolveAdvancedEffectiveBps`, etc.
 - **Report:** `getReportRows({ months, scope, currencies? })` ([`src/db/repositories/report.ts`](src/db/repositories/report.ts)): income/expense sums per month, currency, kind and category, as BigInt.
-- **Statistics:** `getBalanceTimeline`, `downsampleTimeline`, `getPocketSlicesAt`, `getCategorySlices` (income/expense totals by category for a range), `getEarliestOccurredAt` (for charts and time-range defaults). `getBalanceTimeline` and `getPocketSlicesAt` both take an optional `CategoryFilter` (all / uncategorized / one category) that narrows their underlying SQL to that category's income/expense rows.
+- **Statistics:** `getBalanceTimeline`, `downsampleTimeline`, `getEarliestOccurredAt` (for the balance chart and time-range defaults), `scopeBalanceDeltaSql` (a row's balance change per pocket scope). **Monthly stats:** `getMonthlyFlows` (month × kind × category × pocket sums), `getMonthBalanceDeltas` (for month-end balances), `getFirstActivityAt`.
 
 ---
 
@@ -434,7 +434,11 @@ src/
   stores/
     ledgerStore.ts       # zustand: pockets + home balances refresh
   components/
-    ModalSelectField.tsx   # dropdown picker; optional multiSelect (tap toggles, stays open)
+    ModalSelectField.tsx   # dropdown picker; optional multiSelect (tap toggles, stays open); chip trigger
+    MonthlyBarsChart.tsx   # income/expense bars per month (Statistics)
+    RankedBarList.tsx      # breakdown rows with bars (Statistics month)
+    SegmentedControl.tsx
+    BalanceTrendCard.tsx   # collapsible balance-over-time line chart (Statistics)
     TimeRangePickerField.tsx # compact field + sheet: presets / month browser / custom range (Statistics)
     BackupPasswordModal.tsx
     BackupRestoredBanner.tsx
@@ -454,6 +458,8 @@ src/
     TransactionEditorScreen.tsx
     HistoryScreen.tsx
     StatisticsScreen.tsx
+    StatisticsMonthScreen.tsx
+    statistics/            # shared selection, chips, labels for the two Statistics screens
     ReportExportScreen.tsx
     SettingsScreen.tsx
     AssetTypesScreen.tsx
@@ -493,13 +499,11 @@ Keep **SQL strings and migrations** out of React components.
 | Appearance / themes | `colorThemes.ts` + `ThemeContext` + `appearanceCache` on vault gate |
 | Encrypted backup | `backup.ts` → `.tarcak` file; separate backup password |
 | Advanced Jar Balance Chart | `jarAdvancedChartModel` + `JarAdvancedBalanceChart` visual editor |
-| Statistics charts | `statistics` repository + `StatisticsScreen` (`react-native-gifted-charts`); bounded negative-range scaling so the balance chart can't stretch unboundedly |
-| Statistics settings panel | Collapsible Asset / Scope / Category / Time-range panel with summary chips, same pattern as History's filters |
+| Statistics by month | `monthlyStats` domain + repository, `StatisticsScreen` (bars, month list), `StatisticsMonthScreen` (tiles, average, month-end balance, breakdown, History drill-down) |
+| Statistics balance chart | `BalanceTrendCard` (`react-native-gifted-charts`), open by default and collapsible; bounded negative-range scaling so the chart can't stretch unboundedly |
 | Statistics time range | `TimeRangePickerField` — quick presets, month browser (any past year), manual custom range |
-| Statistics category filter | `CategoryFilter` threaded through `getBalanceTimeline` / `getPocketSlicesAt`; narrows balance-over-time and pocket-mix to one category |
-| Pocket mix negative fallback | Shows the negative-balance distribution when there are no positive pocket slices (e.g. an expense-only category filter) |
 | Chart value readout | Fixed row above the chart instead of a floating per-touch tooltip (avoids Android ScrollView clipping of absolutely-positioned overflow content) |
-| Per-category income/expense breakdown | `getCategorySlices` + two donut cards in `StatisticsScreen`; hidden while a specific category filter is active |
+| Per-category income/expense breakdown | `buildBreakdown` + `RankedBarList` on the month screen, by category or pocket |
 | Asset type catalog | `asset_types` + `assetTypes` repository + Settings / editor dropdowns |
 | Category catalog | `categories` + `categories` repository + Settings / transaction editor / History / Statistics |
 | Jar pool & split distribute | `is_jar` pocket, `jar_distribution_rules`, `jar` repository, Jar / Jar split screens |

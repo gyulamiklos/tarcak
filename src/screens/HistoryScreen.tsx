@@ -18,7 +18,7 @@ import * as categoriesRepo from '../db/repositories/categories';
 import * as pocketsRepo from '../db/repositories/pockets';
 import * as settingsRepo from '../db/repositories/settings';
 import * as txRepo from '../db/repositories/transactions';
-import { UNCATEGORIZED_FILTER } from '../domain/transactionFilter';
+import { filterForDrill, UNCATEGORIZED_FILTER } from '../domain/transactionFilter';
 import type { Category, LedgerTransaction } from '../domain/types';
 import type { RootStackScreenProps } from '../navigation/types';
 import { useAppTheme } from '../theme/ThemeContext';
@@ -86,6 +86,7 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
   const styles = useMemo(() => createStyles(colors), [colors]);
   const chartPalette = useMemo(() => buildThemeChartPalette(colors, isDark), [colors, isDark]);
   const paramPocketId = route.params?.pocketId;
+  const drill = route.params?.drill;
   const [items, setItems] = useState<LedgerTransaction[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [pocketNames, setPocketNames] = useState(() => new Map<string, string>());
@@ -122,13 +123,15 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
     const seq = ++loadSeq.current;
     const jar = await pocketsRepo.getJarPocket();
     const list = await txRepo.listTransactions({
-      filter: {
-        kinds: filterKinds,
-        currencies: filterCurrencies,
-        pocketIds: filterPocketIds,
-        categoryIds: filterCategoryIds,
-        jarPocketId: jar?.id ?? null,
-      },
+      filter: drill
+        ? filterForDrill(drill)
+        : {
+            kinds: filterKinds,
+            currencies: filterCurrencies,
+            pocketIds: filterPocketIds,
+            categoryIds: filterCategoryIds,
+            jarPocketId: jar?.id ?? null,
+          },
       limit: HISTORY_PAGE_SIZE,
     });
     if (seq !== loadSeq.current) return;
@@ -158,7 +161,7 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
     } else {
       setFilterLabel('');
     }
-  }, [scopePocketId, filterKinds, filterCurrencies, filterPocketIds, filterCategoryIds]);
+  }, [scopePocketId, filterKinds, filterCurrencies, filterPocketIds, filterCategoryIds, drill]);
 
   const loadMore = useCallback(async () => {
     if (!hasMore || loadingMore.current) return;
@@ -166,13 +169,15 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
     const seq = loadSeq.current;
     try {
       const page = await txRepo.listTransactions({
-        filter: {
-          kinds: filterKinds,
-          currencies: filterCurrencies,
-          pocketIds: filterPocketIds,
-          categoryIds: filterCategoryIds,
-          jarPocketId,
-        },
+        filter: drill
+          ? filterForDrill(drill)
+          : {
+              kinds: filterKinds,
+              currencies: filterCurrencies,
+              pocketIds: filterPocketIds,
+              categoryIds: filterCategoryIds,
+              jarPocketId,
+            },
         limit: HISTORY_PAGE_SIZE,
         offset: items.length,
       });
@@ -196,6 +201,7 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
     filterCurrencies,
     filterPocketIds,
     filterCategoryIds,
+    drill,
   ]);
 
   useFocusEffect(
@@ -353,6 +359,24 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
   return (
     <ScreenWithFooter>
     <View style={styles.container}>
+      {drill ? (
+        <View style={[styles.filterSection, styles.drillRow]}>
+          <Text style={styles.drillLabel} numberOfLines={2}>
+            {drill.label}
+          </Text>
+          <Pressable
+            hitSlop={HIT_SLOP}
+            onPress={() => navigation.setParams({ drill: undefined })}
+            style={styles.summaryChipRemove}
+            accessibilityRole="button"
+            accessibilityLabel={`Remove filter ${drill.label}`}
+          >
+            <Text style={styles.summaryChipRemoveText} accessibilityElementsHidden importantForAccessibility="no">
+              ×
+            </Text>
+          </Pressable>
+        </View>
+      ) : (
       <View style={styles.filterSection}>
         <Pressable style={styles.filterHeaderRow} onPress={toggleFiltersExpanded}>
           <Text style={styles.filterSectionTitle}>
@@ -475,6 +499,7 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
         </>
         ) : null}
       </View>
+      )}
 
       <FlatList
         data={items}
@@ -484,7 +509,7 @@ export default function HistoryScreen({ navigation, route }: RootStackScreenProp
         contentContainerStyle={styles.list}
         ListEmptyComponent={
           <Text style={styles.muted}>
-            {hasActiveFilters ? 'No transactions match these filters.' : 'No transactions yet.'}
+            {drill || hasActiveFilters ? 'No transactions match these filters.' : 'No transactions yet.'}
           </Text>
         }
         renderItem={({ item }) => {
@@ -582,5 +607,7 @@ function createStyles(c: AppColors) {
       alignItems: 'flex-start',
     },
     filterCell: { flexBasis: '48%', flexGrow: 1, minWidth: 0 },
+    drillRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingBottom: 10 },
+    drillLabel: { flex: 1, fontSize: 13, fontFamily: font.semibold, color: c.primary },
   });
 }
